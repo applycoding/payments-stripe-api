@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://payments:payments@postgres:5432/payments
+      STRIPE_MODE: fake
+      STRIPE_WEBHOOK_SECRET: whsec_dev_only_placeholder
+      JOB_TOKEN: dev-job-token
+      ENABLE_SCHEDULER: "true"
+      ENABLE_OUTBOX_POLLER: "true"
+      RECONCILE_CRON: "0 2 * * *"
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

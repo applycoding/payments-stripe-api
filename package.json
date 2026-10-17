@@ -1,0 +1,40 @@
+{
+  "name": "payments-stripe-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test-mode payments API with Stripe Checkout, a double-entry ledger, an outbox, and nightly reconciliation.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 tests/unit/*.test.ts tests/integration/*.test.ts",
+    "migrate": "tsx src/migrate-cli.ts",
+    "reconcile": "tsx src/reconcile-cli.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/applycoding/payments-stripe-api.git"
+  },
+  "author": "Arpan Bom",
+  "license": "MIT",
+  "dependencies": {
+    "fastify": "^5.12.7",
+    "node-cron": "^3.0.3",
+    "pg": "^8.23.1",
+    "stripe": "^23.0.0",
+    "yaml": "^2.9.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
