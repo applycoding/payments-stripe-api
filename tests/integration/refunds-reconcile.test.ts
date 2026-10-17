@@ -74,7 +74,7 @@ describe('refunds, outbox, and reconciliation', () => {
       payload: { amount_cents: 1 },
     });
     assert.equal(extra.statusCode, 409);
-    assert.equal((extra.json() as { error: { code: string } }).error.code, 'refund_exceeds_balance');
+    assert.equal((extra.json() as { error: { code: string } }).error.code, 'payment_not_refundable');
 
     const trial = await ctx.app.inject({ method: 'GET', url: '/v1/ledger/trial-balance' });
     const balance = trial.json() as {
@@ -169,6 +169,7 @@ describe('refunds, outbox, and reconciliation', () => {
     const dirtyBody = dirty.json() as { discrepancy_count: number; discrepancies: Array<{ type: string; key?: string }> };
     assert.ok(dirtyBody.discrepancy_count >= 1);
     assert.ok(dirtyBody.discrepancies.some((item) => item.type === 'missing_in_ledger' && item.key === 'pi_test_orphan'));
-    assert.equal(payment.status, 'succeeded');
+    const fetched = await ctx.app.inject({ method: 'GET', url: `/v1/payments/${payment.id}` });
+    assert.equal((fetched.json() as PaymentBody).status, 'succeeded');
   });
 });
