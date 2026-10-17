@@ -1,0 +1,539 @@
+openapi: 3.0.3
+info:
+  title: Payments API
+  version: 1.0.0
+  description: |
+    Test-mode payments API for Arpan Bom's portfolio demo.
+    Stripe Checkout and PaymentIntents, signed webhooks, idempotency keys,
+    a double-entry ledger, an outbox, refunds, and reconciliation against Stripe events.
+    Live keys and live-mode events are rejected.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3000
+    description: Local docker-compose
+tags:
+  - name: Payments
+  - name: Webhooks
+  - name: Ledger
+  - name: Jobs
+paths:
+  /health:
+    get:
+      summary: Liveness and database check
+      responses:
+        "200":
+          description: Database is reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, stripe_mode]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  stripe_mode:
+                    type: string
+                    enum: [fake, test]
+  /openapi.json:
+    get:
+      summary: This document as JSON
+      responses:
+        "200":
+          description: OpenAPI document
+  /v1/checkout/sessions:
+    post:
+      tags: [Payments]
+      summary: Create a Stripe Checkout Session
+      description: |
+        Inserts a pending payment, then creates a Checkout Session in Stripe test mode
+        (or the in-process fake). Fulfillment happens on the webhook, not on the success URL.
+        Requires an Idempotency-Key. Dynamic payment methods are left to Stripe; this call
+        does not send payment_method_types.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckoutRequest"
+      responses:
+        "201":
+          description: Checkout session created
+          headers:
+            Idempotency-Replayed:
+              schema:
+                type: string
+                enum: ["true", "false"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/payment-intents:
+    post:
+      tags: [Payments]
+      summary: Create a PaymentIntent
+      description: |
+        For off-session or custom client confirmation. The client secret is returned here.
+        The ledger is posted only after payment_intent.succeeded.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentIntentRequest"
+      responses:
+        "201":
+          description: PaymentIntent created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/payments:
+    get:
+      tags: [Payments]
+      summary: List payments
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Newest payments first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Payment"
+  /v1/payments/{id}:
+    get:
+      tags: [Payments]
+      summary: Fetch one payment
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: Payment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/payments/{id}/journal:
+    get:
+      tags: [Ledger]
+      summary: Journal entries for a payment and its refunds
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+      responses:
+        "200":
+          description: Balanced journal entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/JournalEntry"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/payments/{id}/refunds:
+    post:
+      tags: [Payments]
+      summary: Refund a captured payment
+      description: |
+        Reserves the amount, creates a Stripe refund, and posts a reversing ledger entry
+        when Stripe reports success. The refund webhook posts the same entry idempotently.
+      parameters:
+        - $ref: "#/components/parameters/PaymentId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundRequest"
+      responses:
+        "201":
+          description: Refund created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Refund"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/ledger/trial-balance:
+    get:
+      tags: [Ledger]
+      summary: Trial balance
+      description: balanced is true when total debits equal total credits.
+      responses:
+        "200":
+          description: Trial balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrialBalance"
+  /v1/webhooks/stripe:
+    post:
+      tags: [Webhooks]
+      summary: Stripe webhook
+      description: |
+        Verifies Stripe-Signature with the webhook secret before any state change.
+        Handles checkout.session.completed, checkout.session.async_payment_succeeded,
+        checkout.session.async_payment_failed, payment_intent.succeeded,
+        payment_intent.payment_failed, and refund.updated / refund.created / refund.failed.
+        Capture is skipped while payment_status is unpaid.
+      parameters:
+        - in: header
+          name: Stripe-Signature
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Event accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received:
+                    type: boolean
+                  duplicate:
+                    type: boolean
+                  outcome:
+                    type: string
+                    enum: [processed, ignored, failed]
+        "400":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/reconcile:
+    post:
+      tags: [Jobs]
+      summary: Compare the ledger to Stripe events
+      description: |
+        Lists recent Stripe events and diffs them against journal movements.
+        The same job runs nightly at 02:00 UTC when ENABLE_SCHEDULER=true.
+      parameters:
+        - $ref: "#/components/parameters/JobToken"
+      responses:
+        "200":
+          description: Reconciliation report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/outbox/drain:
+    post:
+      tags: [Jobs]
+      summary: Publish pending outbox rows
+      description: Failures retry with exponential backoff. Poison messages stop after 8 attempts.
+      parameters:
+        - $ref: "#/components/parameters/JobToken"
+      responses:
+        "200":
+          description: Drain counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  published:
+                    type: integer
+                  failed:
+                    type: integer
+                  dead:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/reconciliations:
+    get:
+      tags: [Jobs]
+      summary: List reconciliation runs
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Recent runs
+  /v1/reconciliations/{id}:
+    get:
+      tags: [Jobs]
+      summary: Fetch one reconciliation run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Run and report
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{8,255}$"
+    PaymentId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      in: query
+      name: limit
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    JobToken:
+      in: header
+      name: X-Job-Token
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    CheckoutRequest:
+      type: object
+      required: [amount_cents, currency, description, success_url, cancel_url]
+      properties:
+        amount_cents:
+          type: integer
+          minimum: 1
+          maximum: 100000000
+        currency:
+          type: string
+          example: usd
+        description:
+          type: string
+        customer_email:
+          type: string
+          format: email
+        success_url:
+          type: string
+          format: uri
+        cancel_url:
+          type: string
+          format: uri
+    PaymentIntentRequest:
+      type: object
+      required: [amount_cents, currency, description]
+      properties:
+        amount_cents:
+          type: integer
+        currency:
+          type: string
+        description:
+          type: string
+        customer_email:
+          type: string
+          format: email
+    RefundRequest:
+      type: object
+      properties:
+        amount_cents:
+          type: integer
+          description: Defaults to the remaining refundable amount.
+        reason:
+          type: string
+          enum: [duplicate, fraudulent, requested_by_customer]
+    Payment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [checkout, payment_intent]
+        status:
+          type: string
+          enum: [pending, succeeded, failed, canceled, refunded, partially_refunded]
+        amount_cents:
+          type: integer
+        currency:
+          type: string
+        description:
+          type: string
+        customer_email:
+          type: string
+          nullable: true
+        checkout_url:
+          type: string
+          nullable: true
+        stripe_checkout_session_id:
+          type: string
+          nullable: true
+        stripe_payment_intent_id:
+          type: string
+          nullable: true
+        client_secret:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Refund:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        payment_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        amount_cents:
+          type: integer
+        currency:
+          type: string
+        reason:
+          type: string
+          nullable: true
+        stripe_refund_id:
+          type: string
+          nullable: true
+    JournalEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        source_type:
+          type: string
+          enum: [payment, refund]
+        source_id:
+          type: string
+          format: uuid
+        posted_at:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              account_code:
+                type: string
+              direction:
+                type: string
+                enum: [debit, credit]
+              amount_cents:
+                type: integer
+              currency:
+                type: string
+    TrialBalance:
+      type: object
+      properties:
+        balanced:
+          type: boolean
+        total_debit_cents:
+          type: integer
+        total_credit_cents:
+          type: integer
+        accounts:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
+              account_type:
+                type: string
+                enum: [asset, liability, equity, income, expense]
+              currency:
+                type: string
+              debit_cents:
+                type: integer
+              credit_cents:
+                type: integer
+              balance_cents:
+                type: integer
+    ReconciliationReport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        discrepancy_count:
+          type: integer
+        discrepancies:
+          type: array
+          items:
+            type: object
+        stripe_capture_count:
+          type: integer
+        stripe_refund_count:
+          type: integer
+        ledger_capture_count:
+          type: integer
+        ledger_refund_count:
+          type: integer
